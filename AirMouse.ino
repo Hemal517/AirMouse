@@ -26,12 +26,18 @@ Quaternion q; //4D system to keep the tracking smooth
 VectorFloat gravity; //help differentiate between tilting and sliding via arrow pointing earth's gravity
 float ypr[3]; //stores Yaw,Pitch and Roll of sensor   
 
-//Mouse Settings
-float sensitivity = 0.15;      
+// Mouse Settings
+float sensitivity = 0.12;      
 float highSpeedBoost = 0.002;  
 float deadzone = 1.5;          
 float maxSpeed = 20.0;  
-//To change the behaviour of mouse, try changing the above variables       
+
+//Smoothing Settings
+float smoothingFactor = 0.14; 
+
+float smoothedVelocityX = 0.0;
+float smoothedVelocityY = 0.0;
+// -------------------------------
 
 float remainderX = 0.0;
 float remainderY = 0.0;
@@ -48,7 +54,7 @@ void setup() {
     Serial.println("MPU6050 FAILED!");
     while(1); 
   }
-//Calibrating the sensor according to its current placement
+  //Calibrating the sensor according to its current placement
   uint8_t devStatus = mpu.dmpInitialize();
 
   mpu.setXGyroOffset(220);
@@ -104,13 +110,12 @@ void loop() {
   //Pause Logic
   if (isPaused) {
     digitalWrite(status_led, LOW); // Turn OFF LED when paused
-
     // Keep emptying the sensor's trash bin so it doesn't crash
     if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
     }
-    return; // Abort the rest of the loop.
+    return; 
   } else {
-    digitalWrite(status_led, HIGH); // Turn ON LED when active and connected
+    digitalWrite(status_led, HIGH); 
   }
 
   //Left Button
@@ -144,36 +149,42 @@ void loop() {
     mpu.dmpGetGravity(&gravity, &q);
     mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
 
-    //Converting the $D math to simple Pitch and Roll
     float pitch = ypr[1] * 180.0 / M_PI;
     float roll  = ypr[2] * 180.0 / M_PI;
 
-    float velocityX = 0;
-    float velocityY = 0;
+    float targetVelocityX = 0;
+    float targetVelocityY = 0;
 
-    //Parabolic Movement
-    //Custom Physics - Squares the tilt for smooth slow movement, and raises it to the power of 1.5 for the high-speed flicking boost.
-    if (abs(roll) > deadzone) //Ensuring no noise in movement and tilt more than ignore threshold value
+    // Custom Physics with Optimized Math (Replaced pow() with sqrt())
+    if (abs(roll) > deadzone) 
     {
       float activeTilt = abs(roll) - deadzone; 
-      velocityX = ((activeTilt * activeTilt) * sensitivity) + (pow(activeTilt, 1.5) * highSpeedBoost);
-      if (roll < 0) velocityX = -velocityX; 
+      targetVelocityX = ((activeTilt * activeTilt) * sensitivity) + ((activeTilt * sqrt(activeTilt)) * highSpeedBoost);
+      if (roll < 0) targetVelocityX = -targetVelocityX; 
     }
     
     if (abs(pitch) > deadzone) {
       float activeTilt = abs(pitch) - deadzone;
-      velocityY = ((activeTilt * activeTilt) * sensitivity) + (pow(activeTilt, 1.5) * highSpeedBoost);
-      if (pitch < 0) velocityY = -velocityY; 
+      targetVelocityY = ((activeTilt * activeTilt) * sensitivity) + ((activeTilt * sqrt(activeTilt)) * highSpeedBoost);
+      if (pitch < 0) targetVelocityY = -targetVelocityY; 
     }
 
-    //Limiting the max speed possible
-    if (velocityX > maxSpeed) velocityX = maxSpeed;
-    if (velocityX < -maxSpeed) velocityX = -maxSpeed;
-    if (velocityY > maxSpeed) velocityY = maxSpeed;
-    if (velocityY < -maxSpeed) velocityY = -maxSpeed;
+    // Limiting the max speed BEFORE smoothing prevents momentum build-up off-screen
+    if (targetVelocityX > maxSpeed) targetVelocityX = maxSpeed;
+    if (targetVelocityX < -maxSpeed) targetVelocityX = -maxSpeed;
+    if (targetVelocityY > maxSpeed) targetVelocityY = maxSpeed;
+    if (targetVelocityY < -maxSpeed) targetVelocityY = -maxSpeed;
 
-    remainderX += velocityX;
-    remainderY += velocityY;
+    // --- APPLY EXPONENTIAL MOVING AVERAGE (EMA) FILTER ---
+    smoothedVelocityX = (targetVelocityX * smoothingFactor) + (smoothedVelocityX * (1.0 - smoothingFactor));
+    smoothedVelocityY = (targetVelocityY * smoothingFactor) + (smoothedVelocityY * (1.0 - smoothingFactor));
+
+    // Stop the mouse completely if the numbers get microscopically small (prevents eternal drifting)
+    if (abs(smoothedVelocityX) < 0.05) smoothedVelocityX = 0;
+    if (abs(smoothedVelocityY) < 0.05) smoothedVelocityY = 0;
+
+    remainderX += smoothedVelocityX;
+    remainderY += smoothedVelocityY;
 
     int moveX = (int)remainderX;
     int moveY = (int)remainderY;
@@ -181,13 +192,11 @@ void loop() {
     remainderX -= moveX;
     remainderY -= moveY;
 
-    // Move the mouse using your corrected axes
+    // Move the mouse
     if (moveX != 0 || moveY != 0) {
       bleMouse.move(-moveY, moveX); 
-      //Set the above according to orientation of sensor on your board
     }
-
-    //Polling Rate
-    delay(1);
+    
+    // Removed delay(1) to keep the polling rate locked to the DMP output frequency
   }
 }
